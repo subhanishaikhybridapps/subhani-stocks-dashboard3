@@ -2,7 +2,7 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "streamlit run streamlit_app_pro_v2.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"
+#startCommand = "streamlit run streamlit_app_pro_v2.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"
 healthcheckPath = "/_stcore/health"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
