@@ -12,7 +12,8 @@ COPY streamlit_app_pro_v2.py .
 
 EXPOSE 8501
 
-HEALTHCHECK CMD curl --fail http://localhost:${PORT:-8501}/_stcore/health || exit 1
+
+HEALTHCHECK CMD curl --fail http://localhost:8080/_stcore/health || exit 1
 
 CMD streamlit run streamlit_app_pro_v2.py \
     --server.port=${PORT:-8501} \
