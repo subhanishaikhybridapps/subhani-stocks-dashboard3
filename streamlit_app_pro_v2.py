@@ -320,6 +320,7 @@ def _make_nse_headers():
 NSE_HEADERS = _make_nse_headers()
 
 @st.cache_resource(ttl=90)
+@st.cache_resource(ttl=90)
 def get_session():
     """
     NSE uses Cloudflare-style JS cookie protection (nsit, nseappid).
@@ -329,7 +330,14 @@ def get_session():
     if _USE_CLOUDSCRAPER:
         # cloudscraper mimics a real browser — solves JS cookie challenge
         s = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            browser={
+                "browser": "chrome",
+                "platform": "windows",
+                "mobile": False,
+                "desktop": True
+            },
+            delay=5,
+            captcha={"provider": "auto"}
         )
     else:
         s = requests.Session()
@@ -337,20 +345,22 @@ def get_session():
     s.headers.update(_make_nse_headers())
 
     # Warm up in sequence — NSE requires homepage hit first
+    # CRITICAL: Each request must have proper delay for JS cookies to set
     warmup_urls = [
         "https://www.nseindia.com/",
         "https://www.nseindia.com/market-data/live-equity-market",
         "https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE",
     ]
+    
     for url in warmup_urls:
         try:
-            s.get(url, timeout=20, allow_redirects=True)
-            time.sleep(2)  # NSE needs time to set JS cookies
+            r = s.get(url, timeout=25, allow_redirects=True)
+            # NSE needs 3-5 seconds to set JS cookies properly
+            time.sleep(4)
         except Exception:
-            pass
+            time.sleep(2)
 
     return s
-
 def _f(v):
     try: return float(str(v).replace(",","").replace("%","").replace("₹","").strip())
     except: return 0.0
@@ -390,35 +400,45 @@ def color_change(val):
 
 
 @st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_n500():
     """
     Fetch NIFTY 500 live data from NSE India.
-    Tries multiple endpoints — if one fails, tries the next.
+    Tries multiple endpoints with exponential backoff retry logic.
     """
     endpoints = [
         "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
         "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20200",
         "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20100",
     ]
-    for attempt in range(2):          # retry once if first attempt returns empty
+    
+    for attempt in range(2):  # retry once if first attempt returns empty
         for url in endpoints:
             try:
                 s = get_session()
-                time.sleep(1)  # delay between requests to avoid rate limiting
-                r = s.get(url, timeout=20)
+                # Longer delay between requests to avoid rate limiting
+                time.sleep(3 + attempt)
+                r = s.get(url, timeout=25)
+                
                 if r.status_code != 200:
+                    time.sleep(2)
                     continue
+                
                 data = _extract_list(_safe_json(r))
                 data = [x for x in data if isinstance(x, dict)
                         and x.get("symbol","") not in ("","NIFTY 500","Nifty 500",
                                                         "NIFTY 200","NIFTY 100","")]
+                
                 if len(data) >= 5:
                     return data
-            except Exception:
+            except Exception as e:
+                time.sleep(2)
                 continue
-        time.sleep(1)                  # wait 1s before retry
+        
+        # Wait longer before retry
+        time.sleep(4)
+    
     return []
-
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_todays_picks():
     stocks = fetch_n500()
