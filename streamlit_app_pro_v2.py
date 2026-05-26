@@ -313,23 +313,20 @@ NSE_HEADERS = _make_nse_headers()
 @st.cache_resource(ttl=120)
 def get_session():
     """
-    NSE requires warm-up cookies (nsit + nseappid).
-    TTL=120s refreshes session every 2 min so cookies stay fresh.
-    Rotating UA reduces detection by NSE anti-bot on Streamlit Cloud.
+    NSE requires warm-up through homepage first to set nsit + nseappid cookies.
+    Hit all 3 pages in sequence — do NOT break early.
     """
     s = requests.Session()
     s.headers.update(_make_nse_headers())
-    _WARMUP = [
+    warmup_urls = [
         "https://www.nseindia.com/",
         "https://www.nseindia.com/market-data/live-equity-market",
         "https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE",
     ]
-    for url in _WARMUP:
+    for url in warmup_urls:
         try:
-            r = s.get(url, timeout=10, allow_redirects=True)
-            if r.cookies and len(r.cookies) >= 2:
-                break
-            time.sleep(random.uniform(0.2, 0.5))
+            s.get(url, timeout=12, allow_redirects=True)
+            time.sleep(0.4)
         except Exception:
             pass
     return s
@@ -340,12 +337,14 @@ def _f(v):
 
 def _safe_json(r):
     try:
+        if r.status_code != 200:
+            return {}
         txt = r.text.strip()
-        if txt.startswith(("{","[")) or "json" in r.headers.get("Content-Type",""):
+        if txt.startswith(("{","[")):
             return r.json()
-    except: pass
-    return {}
-
+        return {}
+    except Exception:
+        return {}
 def _extract_list(data, keys=("data","Data","results","records")):
     if isinstance(data, list): return data
     if isinstance(data, dict):
@@ -370,20 +369,34 @@ def color_change(val):
 # ═══════════════════════════════════════════════════════════════
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_n500():
-    """Fetch NIFTY 500 live data from NSE India."""
-    try:
-        s = get_session()
-        r = s.get(
-            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
-            timeout=20)
-        data = _extract_list(_safe_json(r))
-        data = [x for x in data if isinstance(x, dict)
-                and x.get("symbol","") not in ("","NIFTY 500","Nifty 500")]
-        return data
-    except Exception:
-        return []
+    """
+    Fetch NIFTY 500 live data from NSE India.
+    Tries multiple endpoints — if one fails, tries the next.
+    """
+    endpoints = [
+        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
+        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20200",
+        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20100",
+    ]
+    for attempt in range(2):          # retry once if first attempt returns empty
+        for url in endpoints:
+            try:
+                s = get_session()
+                r = s.get(url, timeout=20)
+                if r.status_code != 200:
+                    continue
+                data = _extract_list(_safe_json(r))
+                data = [x for x in data if isinstance(x, dict)
+                        and x.get("symbol","") not in ("","NIFTY 500","Nifty 500",
+                                                        "NIFTY 200","NIFTY 100","")]
+                if len(data) >= 5:
+                    return data
+            except Exception:
+                continue
+        time.sleep(1)                  # wait 1s before retry
+    return []
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_todays_picks():
@@ -994,6 +1007,7 @@ def get_live_price(symbol):
         return _f(pi.get("lastPrice",0)),_f(pi.get("pChange",0))
     except: return 0.0,0.0
 
+@st.cache_data(ttl=120, show_spinner=False)
 def fetch_stock_info_full(symbol):
     symbol=symbol.strip().upper(); result={"Symbol":symbol}; s=get_session()
     try:
@@ -1965,7 +1979,22 @@ with st.sidebar:
     st.markdown(f"<div style='text-align:center;padding:8px;background:{mk_bg};border-radius:6px;color:{mk_color};font-weight:700;font-size:0.95rem;'>{mk_text}<br><span style='font-size:0.7rem;opacity:0.8'>{mk_sub}</span></div>", unsafe_allow_html=True)
     st.markdown(f"<div style='text-align:center;color:#f7b731;font-size:0.85rem;padding:8px;'>🕐 IST: {now.strftime('%d %b %Y  %H:%M:%S')}</div>", unsafe_allow_html=True)
     st.markdown("---")
-    if st.button("🔄 Refresh All Data", width='stretch'):
+    if st.button("🔍 Test NSE API", key="test_nse_live", use_container_width=True):
+        with st.spinner("Testing..."):
+            try:
+                _ts = get_session()
+                _tr = _ts.get(
+                    "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
+                    timeout=15)
+                _td = _safe_json(_tr)
+                _cnt = len(_td.get("data", []))
+                if _cnt > 0:
+                    st.success(f"✅ NSE Live — {_cnt} stocks")
+                else:
+                    st.error(f"❌ NSE empty (HTTP {_tr.status_code})")
+            except Exception as _ex:
+                st.error(f"❌ {str(_ex)[:80]}")
+    if st.button("🔄 Refresh All Data", use_container_width=True):
         with st.spinner("⏳ Clearing cache and fetching fresh data..."):
             st.cache_data.clear(); time.sleep(1)
         st.success("✅ Cache cleared! Reloading..."); time.sleep(0.5); st.rerun()
