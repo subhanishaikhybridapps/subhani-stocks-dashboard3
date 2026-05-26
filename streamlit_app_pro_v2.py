@@ -20,11 +20,20 @@ TABS ORDER (v2):
 """
 
 import streamlit as st
-import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import time
 import random
+
+# Use cloudscraper — bypasses Cloudflare/JS cookie challenges that NSE uses
+try:
+    import cloudscraper
+    _USE_CLOUDSCRAPER = True
+except ImportError:
+    import requests
+    _USE_CLOUDSCRAPER = False
+
+import requests  # always import as fallback
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -310,14 +319,24 @@ def _make_nse_headers():
 # Keep NSE_HEADERS as alias for backward compat
 NSE_HEADERS = _make_nse_headers()
 
-@st.cache_resource(ttl=120)
+@st.cache_resource(ttl=90)
 def get_session():
     """
-    NSE requires warm-up through homepage first to set nsit + nseappid cookies.
-    Hit all 3 pages in sequence — do NOT break early.
+    NSE uses Cloudflare-style JS cookie protection (nsit, nseappid).
+    cloudscraper handles the JS challenge automatically.
+    Falls back to requests with manual cookie injection if cloudscraper unavailable.
     """
-    s = requests.Session()
+    if _USE_CLOUDSCRAPER:
+        # cloudscraper mimics a real browser — solves JS cookie challenge
+        s = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+    else:
+        s = requests.Session()
+
     s.headers.update(_make_nse_headers())
+
+    # Warm up in sequence — NSE requires homepage hit first
     warmup_urls = [
         "https://www.nseindia.com/",
         "https://www.nseindia.com/market-data/live-equity-market",
@@ -325,10 +344,11 @@ def get_session():
     ]
     for url in warmup_urls:
         try:
-            s.get(url, timeout=12, allow_redirects=True)
-            time.sleep(0.4)
+            s.get(url, timeout=15, allow_redirects=True)
+            time.sleep(0.5)
         except Exception:
             pass
+
     return s
 
 def _f(v):
@@ -1984,7 +2004,7 @@ with st.sidebar:
             try:
                 _ts = get_session()
                 _tr = _ts.get(
-                    "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%2050",
+                    "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
                     timeout=15)
                 _td = _safe_json(_tr)
                 _cnt = len(_td.get("data", []))
