@@ -344,8 +344,8 @@ def get_session():
     ]
     for url in warmup_urls:
         try:
-            s.get(url, timeout=15, allow_redirects=True)
-            time.sleep(0.5)
+            s.get(url, timeout=20, allow_redirects=True)
+            time.sleep(2)  # NSE needs time to set JS cookies
         except Exception:
             pass
 
@@ -404,6 +404,7 @@ def fetch_n500():
         for url in endpoints:
             try:
                 s = get_session()
+                time.sleep(1)  # delay between requests to avoid rate limiting
                 r = s.get(url, timeout=20)
                 if r.status_code != 200:
                     continue
