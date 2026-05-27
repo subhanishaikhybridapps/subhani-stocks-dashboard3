@@ -20,20 +20,11 @@ TABS ORDER (v2):
 """
 
 import streamlit as st
+import requests
 import pandas as pd
 from datetime import datetime, timedelta
 import time
 import random
-
-# Use cloudscraper — bypasses Cloudflare/JS cookie challenges that NSE uses
-try:
-    import cloudscraper
-    _USE_CLOUDSCRAPER = True
-except ImportError:
-    import requests
-    _USE_CLOUDSCRAPER = False
-
-import requests  # always import as fallback
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -285,89 +276,196 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 #  NSE SESSION & HELPERS
 # ═══════════════════════════════════════════════════════════════
-# ── Rotating User-Agent pool (reduces NSE cloud-block detection) ──────────────
-_UA_POOL = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 12; Redmi Note 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-]
+# ══════════════════════════════════════════════════════════════════
+#  DATA SOURCES
+#  PRIMARY : Yahoo Finance via yfinance (works everywhere, 15min delay)
+#  SECONDARY: NSE direct (for FII/DII, bulk/block, delivery only)
+#             Uses simple requests — works when cookies available
+# ══════════════════════════════════════════════════════════════════
+
+import json as _json, os as _os
+
+_NSE_BASE    = "https://www.nseindia.com"
+_COOKIE_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "nse_cookies.json")
+
+_NSE_HEADERS = {
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection":      "keep-alive",
+    "Referer":         "https://www.nseindia.com/market-data/live-equity-market",
+    "X-Requested-With":"XMLHttpRequest",
+}
 
 def _make_nse_headers():
-    ua = random.choice(_UA_POOL)
-    return {
-        "User-Agent":         ua,
-        "Accept":             "application/json, text/plain, */*",
-        "Accept-Language":    "en-IN,en-GB;q=0.9,en;q=0.8",
-        "Accept-Encoding":    "gzip, deflate, br",
-        "Connection":         "keep-alive",
-        "Cache-Control":      "no-cache",
-        "Pragma":             "no-cache",
-        "Referer":            "https://www.nseindia.com/market-data/live-equity-market",
-        "Origin":             "https://www.nseindia.com",
-        "sec-ch-ua":          '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "sec-ch-ua-mobile":   "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest":     "empty",
-        "Sec-Fetch-Mode":     "cors",
-        "Sec-Fetch-Site":     "same-origin",
-        "X-Requested-With":   "XMLHttpRequest",
-    }
+    return _NSE_HEADERS
 
-# Keep NSE_HEADERS as alias for backward compat
-NSE_HEADERS = _make_nse_headers()
+NSE_HEADERS = _NSE_HEADERS
 
-@st.cache_resource(ttl=90)
-@st.cache_resource(ttl=90)
+# ── NSE session (secondary — for FII/DII/bulk/delivery only) ─────────────────
+_nse_session      = None
+_session_built_at = 0
+
 def get_session():
     """
-    NSE uses Cloudflare-style JS cookie protection (nsit, nseappid).
-    cloudscraper handles the JS challenge automatically.
-    Falls back to requests with manual cookie injection if cloudscraper unavailable.
+    Returns a requests.Session for NSE-exclusive endpoints.
+    Loads cookies from file if available, else uses plain session.
     """
-    if _USE_CLOUDSCRAPER:
-        # cloudscraper mimics a real browser — solves JS cookie challenge
-        s = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "mobile": False,
-                "desktop": True
-            },
-            delay=5,
-            captcha={"provider": "auto"}
-        )
-    else:
+    global _nse_session, _session_built_at
+    now = time.time()
+    if _nse_session is None or (now - _session_built_at) > 1500:
         s = requests.Session()
-
-    s.headers.update(_make_nse_headers())
-
-    # Warm up in sequence — NSE requires homepage hit first
-    # CRITICAL: Each request must have proper delay for JS cookies to set
-    warmup_urls = [
-        "https://www.nseindia.com/",
-        "https://www.nseindia.com/market-data/live-equity-market",
-        "https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE",
-    ]
-    
-    for url in warmup_urls:
+        s.headers.update(_NSE_HEADERS)
+        # Load cookies from file if available
         try:
-            r = s.get(url, timeout=25, allow_redirects=True)
-            # NSE needs 3-5 seconds to set JS cookies properly
-            time.sleep(4)
+            if _os.path.exists(_COOKIE_FILE):
+                age = now - _os.path.getmtime(_COOKIE_FILE)
+                if age < 1800:  # use if < 30 min old
+                    data = _json.load(open(_COOKIE_FILE))
+                    for name, value in data.get("cookies", {}).items():
+                        s.cookies.set(name, value, domain=".nseindia.com", path="/")
         except Exception:
-            time.sleep(2)
+            pass
+        # Quick warm-up
+        try:
+            s.get(_NSE_BASE + "/", timeout=8)
+            time.sleep(0.3)
+        except Exception:
+            pass
+        _nse_session      = s
+        _session_built_at = now
+    return _nse_session
 
-    return s
+
+# ── Yahoo Finance stock list (NIFTY 500 tickers) ─────────────────────────────
+_NIFTY500_YF = [
+    # Large Cap
+    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","BHARTIARTL.NS","ICICIBANK.NS",
+    "INFY.NS","HINDUNILVR.NS","ITC.NS","SBIN.NS","BAJFINANCE.NS",
+    "LICI.NS","KOTAKBANK.NS","LT.NS","HCLTECH.NS","ASIANPAINT.NS",
+    "AXISBANK.NS","MARUTI.NS","NESTLEIND.NS","WIPRO.NS","ULTRACEMCO.NS",
+    "ADANIENT.NS","SUNPHARMA.NS","ONGC.NS","POWERGRID.NS","NTPC.NS",
+    "TATAMOTORS.NS","TITAN.NS","BAJAJFINSV.NS","TATASTEEL.NS","ADANIPORTS.NS",
+    "COALINDIA.NS","M&M.NS","JSWSTEEL.NS","GRASIM.NS","DRREDDY.NS",
+    "HINDALCO.NS","INDUSINDBK.NS","SBILIFE.NS","HDFCLIFE.NS","BRITANNIA.NS",
+    # Mid Cap
+    "CIPLA.NS","TATACONSUM.NS","APOLLOHOSP.NS","TECHM.NS","DIVISLAB.NS",
+    "HEROMOTOCO.NS","BAJAJ-AUTO.NS","EICHERMOT.NS","SHRIRAMFIN.NS","BEL.NS",
+    "TRENT.NS","SIEMENS.NS","HAVELLS.NS","PIDILITIND.NS","GODREJCP.NS",
+    "TORNTPHARM.NS","MUTHOOTFIN.NS","CHOLAFIN.NS","DABUR.NS","LUPIN.NS",
+    "SRF.NS","DMART.NS","BANKBARODA.NS","INDHOTEL.NS","ZOMATO.NS",
+    "PNB.NS","CANBK.NS","IOC.NS","BPCL.NS","GAIL.NS",
+    "VEDL.NS","NMDC.NS","ASHOKLEY.NS","AUROPHARMA.NS","BIOCON.NS",
+    "MRF.NS","POLYCAB.NS","DIXON.NS","PERSISTENT.NS","MPHASIS.NS",
+    "COFORGE.NS","OFSS.NS","IRCTC.NS","HAL.NS","BHEL.NS",
+    # Small/Thematic
+    "RVNL.NS","PFC.NS","RECLTD.NS","IRFC.NS","HUDCO.NS",
+    "MOTHERSON.NS","BALKRISIND.NS","ALKEM.NS","BOSCHLTD.NS","CROMPTON.NS",
+    "VOLTAS.NS","TATAPOWER.NS","ADANIGREEN.NS","PIIND.NS","SUNDARMFIN.NS",
+    "LTIM.NS","NAUKRI.NS","ZYDUSLIFE.NS","IDFCFIRSTB.NS","FEDERALBNK.NS",
+    "BANDHANBNK.NS","RBLBANK.NS","YESBANK.NS","SAIL.NS","NATIONALUM.NS",
+    "HINDCOPPER.NS","MOIL.NS","GMRAIRPORT.NS","OBEROIRLTY.NS","DLF.NS",
+    "GODREJPROP.NS","PRESTIGE.NS","SOBHA.NS","MCDOWEL-N.NS","RADICO.NS",
+    "JUBLFOOD.NS","TATACOMM.NS","HFCL.NS","INTELLECT.NS","KPITTECH.NS",
+    "TATAELXSI.NS","CYIENT.NS","LTTS.NS","ZENSAR.NS","CUMMINSIND.NS",
+    "SCHAEFFLER.NS","SKFINDIA.NS","TIINDIA.NS","FINPIPE.NS","CARBORUNIV.NS",
+]
+
+
+@st.cache_data(ttl=900, show_spinner=False)  # 15 min cache matches YF delay
+def _fetch_yf_batch(tickers_tuple):
+    """Fetch a batch of tickers from Yahoo Finance."""
+    try:
+        import yfinance as yf
+        tickers = list(tickers_tuple)
+        import warnings, logging
+        logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+        warnings.filterwarnings("ignore")
+        data = yf.download(
+            tickers, period="5d", interval="1d",
+            group_by="ticker", auto_adjust=True,
+            progress=False, threads=True, timeout=30,
+        )
+        rows = []
+        for sym_ns in tickers:
+            sym = sym_ns.replace(".NS","")
+            try:
+                if len(tickers) == 1:
+                    df = data
+                else:
+                    df = data[sym_ns]
+                df = df.dropna(subset=["Close"])
+                if len(df) < 2:
+                    continue
+                ltp  = float(df["Close"].iloc[-1])
+                prev = float(df["Close"].iloc[-2])
+                h52  = float(df["High"].max())
+                l52  = float(df["Low"].min())
+                vol  = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else 0
+                opn  = float(df["Open"].iloc[-1])
+                pchg = round((ltp - prev) / prev * 100, 2) if prev > 0 else 0
+                rows.append({
+                    "symbol":            sym,
+                    "lastPrice":         ltp,
+                    "previousClose":     prev,
+                    "pChange":           pchg,
+                    "change":            round(ltp - prev, 2),
+                    "yearHigh":          h52,
+                    "yearLow":           l52,
+                    "totalTradedVolume": int(vol),
+                    "open":              opn,
+                })
+            except Exception:
+                continue
+        return rows
+    except Exception:
+        return []
+
+
+def fetch_n500():
+    """
+    Fetch stock data via Yahoo Finance.
+    Data is 15 minutes delayed but works from any location without NSE cookies.
+    Falls back to NSE direct if yfinance not installed.
+    """
+    # ── Try yfinance first ────────────────────────────────────────
+    try:
+        import yfinance as yf
+        # Split into 2 batches to avoid timeout
+        mid   = len(_NIFTY500_YF) // 2
+        rows  = _fetch_yf_batch(tuple(_NIFTY500_YF[:mid]))
+        rows += _fetch_yf_batch(tuple(_NIFTY500_YF[mid:]))
+        if len(rows) >= 10:
+            return rows
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # ── Fallback: NSE direct ──────────────────────────────────────
+    try:
+        s = get_session()
+        r = s.get(
+            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
+            timeout=20)
+        data = _extract_list(_safe_json(r))
+        data = [x for x in data if isinstance(x, dict)
+                and x.get("symbol","") not in ("","NIFTY 500","Nifty 500")]
+        if len(data) >= 5:
+            return data
+    except Exception:
+        pass
+
+    return []
+
 def _f(v):
     try: return float(str(v).replace(",","").replace("%","").replace("₹","").strip())
     except: return 0.0
 
 def _safe_json(r):
     try:
-        if r.status_code != 200:
+        if r.status_code not in (200, 201):
             return {}
         txt = r.text.strip()
         if txt.startswith(("{","[")):
@@ -399,46 +497,6 @@ def color_change(val):
 # ═══════════════════════════════════════════════════════════════
 
 
-@st.cache_data(ttl=180, show_spinner=False)
-@st.cache_data(ttl=180, show_spinner=False)
-def fetch_n500():
-    """
-    Fetch NIFTY 500 live data from NSE India.
-    Tries multiple endpoints with exponential backoff retry logic.
-    """
-    endpoints = [
-        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
-        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20200",
-        "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20100",
-    ]
-    
-    for attempt in range(2):  # retry once if first attempt returns empty
-        for url in endpoints:
-            try:
-                s = get_session()
-                # Longer delay between requests to avoid rate limiting
-                time.sleep(3 + attempt)
-                r = s.get(url, timeout=25)
-                
-                if r.status_code != 200:
-                    time.sleep(2)
-                    continue
-                
-                data = _extract_list(_safe_json(r))
-                data = [x for x in data if isinstance(x, dict)
-                        and x.get("symbol","") not in ("","NIFTY 500","Nifty 500",
-                                                        "NIFTY 200","NIFTY 100","")]
-                
-                if len(data) >= 5:
-                    return data
-            except Exception as e:
-                time.sleep(2)
-                continue
-        
-        # Wait longer before retry
-        time.sleep(4)
-    
-    return []
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_todays_picks():
     stocks = fetch_n500()
@@ -2020,22 +2078,27 @@ with st.sidebar:
     st.markdown(f"<div style='text-align:center;padding:8px;background:{mk_bg};border-radius:6px;color:{mk_color};font-weight:700;font-size:0.95rem;'>{mk_text}<br><span style='font-size:0.7rem;opacity:0.8'>{mk_sub}</span></div>", unsafe_allow_html=True)
     st.markdown(f"<div style='text-align:center;color:#f7b731;font-size:0.85rem;padding:8px;'>🕐 IST: {now.strftime('%d %b %Y  %H:%M:%S')}</div>", unsafe_allow_html=True)
     st.markdown("---")
-    if st.button("🔍 Test NSE API", key="test_nse_live", use_container_width=True):
-        with st.spinner("Testing..."):
+    st.sidebar.markdown(
+        "<div style='background:#0d1a2a;border:1px solid #00d2ff;border-radius:6px;"
+        "padding:6px 10px;font-size:0.76rem;color:#00d2ff;margin-bottom:8px'>"
+        "📡 Data: Yahoo Finance (15 min delay)<br>"
+        "<span style='color:#8899bb;font-size:0.7rem'>FII/DII from NSE when available</span>"
+        "</div>", unsafe_allow_html=True)
+
+    if st.button("🔍 Test Data Feed", key="test_nse_live", use_container_width=True):
+        with st.spinner("Fetching from Yahoo Finance..."):
             try:
-                _ts = get_session()
-                _tr = _ts.get(
-                    "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
-                    timeout=15)
-                _td = _safe_json(_tr)
-                _cnt = len(_td.get("data", []))
-                if _cnt > 0:
-                    st.success(f"✅ NSE Live — {_cnt} stocks")
+                import yfinance as yf
+                _t = yf.Ticker("RELIANCE.NS")
+                _p = _t.fast_info.last_price
+                if _p and _p > 0:
+                    st.success(f"✅ Yahoo Finance OK — RELIANCE ₹{_p:,.2f}")
                 else:
-                    st.error(f"❌ NSE empty (HTTP {_tr.status_code})")
+                    st.warning("⚠️ Yahoo returned empty price")
             except Exception as _ex:
                 st.error(f"❌ {str(_ex)[:80]}")
     if st.button("🔄 Refresh All Data", use_container_width=True):
+        st.cache_data.clear()
         with st.spinner("⏳ Clearing cache and fetching fresh data..."):
             st.cache_data.clear(); time.sleep(1)
         st.success("✅ Cache cleared! Reloading..."); time.sleep(0.5); st.rerun()
