@@ -15,16 +15,16 @@ TABS ORDER (v2):
   7  🌱 Long Term View
   8  📉 All Indices
   9  🔍 Stock Info
-  10 🏦 Mutual Funds
+  10 🏦 Mutual Fund
   11 🛡️ Pro Tools
 """
 
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
-import time
 import random
+import time
+from datetime import datetime, timedelta
 
 # ═══════════════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -276,71 +276,45 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════
 #  NSE SESSION & HELPERS
 # ═══════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════
-#  DATA SOURCES
-#  PRIMARY : Yahoo Finance via yfinance (works everywhere, 15min delay)
-#  SECONDARY: NSE direct (for FII/DII, bulk/block, delivery only)
-#             Uses simple requests — works when cookies available
-# ══════════════════════════════════════════════════════════════════
+# ── Rotating User-Agents — reduces NSE bot detection ─────────────────────────
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
 
-import json as _json, os as _os
+def _make_headers():
+    return {
+        "User-Agent":         random.choice(_UA_POOL),
+        "Accept":             "application/json, text/plain, */*",
+        "Accept-Language":    "en-IN,en-GB;q=0.9,en;q=0.8",
+        "Accept-Encoding":    "gzip, deflate, br",
+        "Connection":         "keep-alive",
+        "Referer":            "https://www.nseindia.com/market-data/live-equity-market",
+        "X-Requested-With":   "XMLHttpRequest",
+        "Cache-Control":      "no-cache",
+        "sec-ch-ua-mobile":   "?0",
+        "Sec-Fetch-Dest":     "empty",
+        "Sec-Fetch-Mode":     "cors",
+        "Sec-Fetch-Site":     "same-origin",
+    }
 
-_NSE_BASE    = "https://www.nseindia.com"
-_COOKIE_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "nse_cookies.json")
-
-_NSE_HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept":          "application/json, text/plain, */*",
-    "Accept-Language": "en-IN,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection":      "keep-alive",
-    "Referer":         "https://www.nseindia.com/market-data/live-equity-market",
-    "X-Requested-With":"XMLHttpRequest",
+# Static fallback headers (backward compat) — get_session() uses _make_headers() per call
+NSE_HEADERS = {
+    "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":             "application/json, text/plain, */*",
+    "Accept-Language":    "en-IN,en-GB;q=0.9,en;q=0.8",
+    "Accept-Encoding":    "gzip, deflate, br",
+    "Connection":         "keep-alive",
+    "Referer":            "https://www.nseindia.com/market-data/live-equity-market",
+    "X-Requested-With":   "XMLHttpRequest",
 }
 
-def _make_nse_headers():
-    return _NSE_HEADERS
 
-NSE_HEADERS = _NSE_HEADERS
-
-# ── NSE session (secondary — for FII/DII/bulk/delivery only) ─────────────────
-_nse_session      = None
-_session_built_at = 0
-
-def get_session():
-    """
-    Returns a requests.Session for NSE-exclusive endpoints.
-    Loads cookies from file if available, else uses plain session.
-    """
-    global _nse_session, _session_built_at
-    now = time.time()
-    if _nse_session is None or (now - _session_built_at) > 1500:
-        s = requests.Session()
-        s.headers.update(_NSE_HEADERS)
-        # Load cookies from file if available
-        try:
-            if _os.path.exists(_COOKIE_FILE):
-                age = now - _os.path.getmtime(_COOKIE_FILE)
-                if age < 1800:  # use if < 30 min old
-                    data = _json.load(open(_COOKIE_FILE))
-                    for name, value in data.get("cookies", {}).items():
-                        s.cookies.set(name, value, domain=".nseindia.com", path="/")
-        except Exception:
-            pass
-        # Quick warm-up
-        try:
-            s.get(_NSE_BASE + "/", timeout=8)
-            time.sleep(0.3)
-        except Exception:
-            pass
-        _nse_session      = s
-        _session_built_at = now
-    return _nse_session
-
-
-# ── Yahoo Finance stock list (NIFTY 500 tickers) ─────────────────────────────
-_NIFTY500_YF = [
-    # Large Cap
+# ── Yahoo Finance fallback ticker list ───────────────────────────────────────
+_YF_NIFTY500 = [
     "RELIANCE.NS","TCS.NS","HDFCBANK.NS","BHARTIARTL.NS","ICICIBANK.NS",
     "INFY.NS","HINDUNILVR.NS","ITC.NS","SBIN.NS","BAJFINANCE.NS",
     "LICI.NS","KOTAKBANK.NS","LT.NS","HCLTECH.NS","ASIANPAINT.NS",
@@ -349,7 +323,6 @@ _NIFTY500_YF = [
     "TATAMOTORS.NS","TITAN.NS","BAJAJFINSV.NS","TATASTEEL.NS","ADANIPORTS.NS",
     "COALINDIA.NS","M&M.NS","JSWSTEEL.NS","GRASIM.NS","DRREDDY.NS",
     "HINDALCO.NS","INDUSINDBK.NS","SBILIFE.NS","HDFCLIFE.NS","BRITANNIA.NS",
-    # Mid Cap
     "CIPLA.NS","TATACONSUM.NS","APOLLOHOSP.NS","TECHM.NS","DIVISLAB.NS",
     "HEROMOTOCO.NS","BAJAJ-AUTO.NS","EICHERMOT.NS","SHRIRAMFIN.NS","BEL.NS",
     "TRENT.NS","SIEMENS.NS","HAVELLS.NS","PIDILITIND.NS","GODREJCP.NS",
@@ -359,62 +332,63 @@ _NIFTY500_YF = [
     "VEDL.NS","NMDC.NS","ASHOKLEY.NS","AUROPHARMA.NS","BIOCON.NS",
     "MRF.NS","POLYCAB.NS","DIXON.NS","PERSISTENT.NS","MPHASIS.NS",
     "COFORGE.NS","OFSS.NS","IRCTC.NS","HAL.NS","BHEL.NS",
-    # Small/Thematic
     "RVNL.NS","PFC.NS","RECLTD.NS","IRFC.NS","HUDCO.NS",
     "MOTHERSON.NS","BALKRISIND.NS","ALKEM.NS","BOSCHLTD.NS","CROMPTON.NS",
     "VOLTAS.NS","TATAPOWER.NS","ADANIGREEN.NS","PIIND.NS","SUNDARMFIN.NS",
     "LTIM.NS","NAUKRI.NS","ZYDUSLIFE.NS","IDFCFIRSTB.NS","FEDERALBNK.NS",
     "BANDHANBNK.NS","RBLBANK.NS","YESBANK.NS","SAIL.NS","NATIONALUM.NS",
     "HINDCOPPER.NS","MOIL.NS","GMRAIRPORT.NS","OBEROIRLTY.NS","DLF.NS",
-    "GODREJPROP.NS","PRESTIGE.NS","SOBHA.NS","MCDOWEL-N.NS","RADICO.NS",
-    "JUBLFOOD.NS","TATACOMM.NS","HFCL.NS","INTELLECT.NS","KPITTECH.NS",
-    "TATAELXSI.NS","CYIENT.NS","LTTS.NS","ZENSAR.NS","CUMMINSIND.NS",
-    "SCHAEFFLER.NS","SKFINDIA.NS","TIINDIA.NS","FINPIPE.NS","CARBORUNIV.NS",
+    "GODREJPROP.NS","PRESTIGE.NS","SOBHA.NS","RADICO.NS","JUBLFOOD.NS",
+    "TATACOMM.NS","HFCL.NS","INTELLECT.NS","KPITTECH.NS","TATAELXSI.NS",
+    "CYIENT.NS","LTTS.NS","ZENSAR.NS","CUMMINSIND.NS","TIINDIA.NS",
 ]
 
-
-@st.cache_data(ttl=900, show_spinner=False)  # 15 min cache matches YF delay
-def _fetch_yf_batch(tickers_tuple):
-    """Fetch a batch of tickers from Yahoo Finance."""
+@st.cache_data(ttl=1800, show_spinner=False)
+def _yf_fetch_batch(tickers_tuple):
+    """Fetch a batch from Yahoo Finance. Returns list of stock dicts."""
     try:
         import yfinance as yf
-        tickers = list(tickers_tuple)
         import warnings, logging
         logging.getLogger("yfinance").setLevel(logging.CRITICAL)
         warnings.filterwarnings("ignore")
+        tickers = list(tickers_tuple)
         data = yf.download(
-            tickers, period="5d", interval="1d",
+            tickers, period="1y", interval="1d",
             group_by="ticker", auto_adjust=True,
-            progress=False, threads=True, timeout=30,
+            progress=False, threads=True, timeout=30
         )
         rows = []
         for sym_ns in tickers:
             sym = sym_ns.replace(".NS","")
             try:
-                if len(tickers) == 1:
-                    df = data
-                else:
-                    df = data[sym_ns]
+                df = data[sym_ns] if len(tickers) > 1 else data
                 df = df.dropna(subset=["Close"])
-                if len(df) < 2:
-                    continue
+                if len(df) < 2: continue
                 ltp  = float(df["Close"].iloc[-1])
                 prev = float(df["Close"].iloc[-2])
-                h52  = float(df["High"].max())
-                l52  = float(df["Low"].min())
+                h52  = float(df["High"].max())   # true 52-week high from 1y data
+                l52  = float(df["Low"].min())    # true 52-week low from 1y data
                 vol  = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else 0
+                # avg vol = 20-day average for relative volume
+                avg_vol = float(df["Volume"].tail(20).mean()) if "Volume" in df.columns else vol
                 opn  = float(df["Open"].iloc[-1])
+                if ltp <= 0: continue
                 pchg = round((ltp - prev) / prev * 100, 2) if prev > 0 else 0
                 rows.append({
-                    "symbol":            sym,
-                    "lastPrice":         ltp,
-                    "previousClose":     prev,
-                    "pChange":           pchg,
-                    "change":            round(ltp - prev, 2),
-                    "yearHigh":          h52,
-                    "yearLow":           l52,
-                    "totalTradedVolume": int(vol),
-                    "open":              opn,
+                    "symbol":              sym,
+                    "lastPrice":           ltp,
+                    "previousClose":       prev,
+                    "pChange":             pchg,
+                    "change":              round(ltp - prev, 2),
+                    "yearHigh":            h52,
+                    "yearLow":             l52,
+                    "totalTradedVolume":   int(vol),
+                    "averageTradedPrice":  round(avg_vol * ltp / 1e7, 2),
+                    "open":                opn,
+                    "dayHigh":             float(df["High"].iloc[-1]),
+                    "dayLow":              float(df["Low"].iloc[-1]),
+                    "nearWKHigh":          round((ltp / h52) * 100, 1) if h52 > 0 else 0,
+                    "nearWKLow":           round((ltp / l52) * 100, 1) if l52 > 0 else 0,
                 })
             except Exception:
                 continue
@@ -422,42 +396,32 @@ def _fetch_yf_batch(tickers_tuple):
     except Exception:
         return []
 
+def _fetch_yf_all():
+    """Fetch all NIFTY 500 stocks from Yahoo Finance in 2 batches."""
+    mid   = len(_YF_NIFTY500) // 2
+    rows  = _yf_fetch_batch(tuple(_YF_NIFTY500[:mid]))
+    rows += _yf_fetch_batch(tuple(_YF_NIFTY500[mid:]))
+    return rows
 
-def fetch_n500():
+@st.cache_resource(ttl=120)
+def get_session():
     """
-    Fetch stock data via Yahoo Finance.
-    Data is 15 minutes delayed but works from any location without NSE cookies.
-    Falls back to NSE direct if yfinance not installed.
+    Build NSE session with fresh headers + full 3-step warm-up.
+    TTL=120s keeps cookies fresh. Rotating UA avoids bot detection.
     """
-    # ── Try yfinance first ────────────────────────────────────────
-    try:
-        import yfinance as yf
-        # Split into 2 batches to avoid timeout
-        mid   = len(_NIFTY500_YF) // 2
-        rows  = _fetch_yf_batch(tuple(_NIFTY500_YF[:mid]))
-        rows += _fetch_yf_batch(tuple(_NIFTY500_YF[mid:]))
-        if len(rows) >= 10:
-            return rows
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # ── Fallback: NSE direct ──────────────────────────────────────
-    try:
-        s = get_session()
-        r = s.get(
-            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
-            timeout=20)
-        data = _extract_list(_safe_json(r))
-        data = [x for x in data if isinstance(x, dict)
-                and x.get("symbol","") not in ("","NIFTY 500","Nifty 500")]
-        if len(data) >= 5:
-            return data
-    except Exception:
-        pass
-
-    return []
+    s = requests.Session()
+    s.headers.update(_make_headers())
+    for url in [
+        "https://www.nseindia.com/",
+        "https://www.nseindia.com/market-data/live-equity-market",
+        "https://www.nseindia.com/get-quotes/equity?symbol=RELIANCE",
+    ]:
+        try:
+            s.get(url, timeout=10, allow_redirects=True)
+            time.sleep(0.5)
+        except Exception:
+            pass
+    return s
 
 def _f(v):
     try: return float(str(v).replace(",","").replace("%","").replace("₹","").strip())
@@ -465,14 +429,12 @@ def _f(v):
 
 def _safe_json(r):
     try:
-        if r.status_code not in (200, 201):
-            return {}
         txt = r.text.strip()
-        if txt.startswith(("{","[")):
+        if txt.startswith(("{","[")) or "json" in r.headers.get("Content-Type",""):
             return r.json()
-        return {}
-    except Exception:
-        return {}
+    except: pass
+    return {}
+
 def _extract_list(data, keys=("data","Data","results","records")):
     if isinstance(data, list): return data
     if isinstance(data, dict):
@@ -496,8 +458,38 @@ def color_change(val):
 #  DATA FETCHERS
 # ═══════════════════════════════════════════════════════════════
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_n500():
+    """
+    Try NSE first. If NSE returns empty (cloud IP blocked),
+    automatically fall back to Yahoo Finance (15-min delay).
+    Works from any server — Streamlit Cloud, Railway, local.
+    """
+    # ── Try NSE ──────────────────────────────────────────────
+    try:
+        s = get_session()
+        r = s.get(
+            "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500",
+            timeout=15)
+        data = _extract_list(_safe_json(r))
+        data = [x for x in data if isinstance(x, dict)
+                and x.get("symbol","") not in ("","NIFTY 500","Nifty 500")]
+        if len(data) >= 10:
+            st.session_state["_src"] = "nse"
+            return data
+    except Exception:
+        pass
+    # ── NSE empty/blocked → Yahoo Finance ────────────────────
+    try:
+        rows = _fetch_yf_all()
+        if len(rows) >= 10:
+            st.session_state["_src"] = "yf"
+            return rows
+    except Exception:
+        pass
+    return []
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_todays_picks():
     stocks = fetch_n500()
     buys, sells = [], []
@@ -544,7 +536,7 @@ def fetch_todays_picks():
     sells.sort(key=lambda x:x["Score"])
     return buys[:20], sells[:15]
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_52w_breakout():
     s=get_session(); rows=[]
     try:
@@ -576,7 +568,7 @@ def fetch_52w_breakout():
         rows.sort(key=lambda x:_f(x["Change%"]),reverse=True); rows=rows[:40]
     return rows
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_gainers_losers():
     s=get_session(); gainers=[]; losers=[]
     for url,lst,typ in [
@@ -617,10 +609,11 @@ def fetch_gainers_losers():
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_indices():
+    """Uses dedicated allIndices endpoint — independent of NIFTY 500."""
     s=get_session(); rows=[]
     try:
         r=s.get("https://www.nseindia.com/api/allIndices",timeout=15)
-        items=_extract_list(_safe_json(r))
+        items=_safe_json(r).get("data", _extract_list(_safe_json(r)))
         for item in items:
             if not isinstance(item,dict): continue
             name=item.get("index",item.get("indexSymbol",""))
@@ -639,7 +632,7 @@ def fetch_indices():
                "52W High":"","52W Low":"","Prev Close":"","Signal":""}]
     return rows
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_high_fall():
     rows=[]
     for item in fetch_n500():
@@ -656,7 +649,7 @@ def fetch_high_fall():
     rows.sort(key=lambda x:_f(x["Fall From High"]),reverse=True)
     return rows[:40]
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_technical_strong():
     rows=[]
     for item in fetch_n500():
@@ -701,39 +694,33 @@ def fetch_dividend_splits():
             seen_s.add(sym); splits.append({"Symbol":sym,"Company":comp,"Ex-Date":ex_dt,"Record Date":rec_dt,"Purpose":purp})
     return divs[:50], splits[:30]
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_fii_dii():
-    s = get_session(); rows = []
+    s=get_session(); rows=[]
     try:
-        r = s.get("https://www.nseindia.com/api/fiidiiTradeReact", timeout=15)
-        items = _extract_list(_safe_json(r))
+        r=s.get("https://www.nseindia.com/api/fiidiiTradeReact",timeout=15)
+        items=_extract_list(_safe_json(r))
         for item in items:
-            if not isinstance(item, dict): continue
-            buy_v  = _f(item.get("buyValue",  item.get("buy_value",  0)))
-            sell_v = _f(item.get("sellValue", item.get("sell_value", 0)))
-            net_v  = _f(item.get("netValue",  item.get("net_value",  0))) or round(buy_v - sell_v, 2)
-            cat    = item.get("category", item.get("name", ""))
-            date   = item.get("date", item.get("tradingDate", datetime.today().strftime("%d-%b-%Y")))
-            rows.append({
-                "Date":      date,
-                "Category":  cat,
-                "Buy (Cr)":  f"₹{buy_v:,.2f}",
-                "Sell (Cr)": f"₹{sell_v:,.2f}",
-                "Net (Cr)":  f"₹{net_v:+,.2f}",
-                "Signal":    "🟢 NET BUY"  if net_v >= 0 else "🔴 NET SELL",
-                "Impact":    "🔺 Bullish"  if net_v > 500 else ("🔻 Bearish" if net_v < -500 else "➡️ Neutral"),
-            })
-    except Exception:
-        pass
+            if not isinstance(item,dict): continue
+            buy_v=_f(item.get("buyValue",item.get("buy_value",0)))
+            sell_v=_f(item.get("sellValue",item.get("sell_value",0)))
+            net_v=_f(item.get("netValue",item.get("net_value",0))) or round(buy_v-sell_v,2)
+            cat=item.get("category",item.get("name",""))
+            date=item.get("date",item.get("tradingDate",datetime.today().strftime("%d-%b-%Y")))
+            rows.append({"Date":date,"Category":cat,
+                "Buy (Cr)":f"₹{buy_v:,.2f}","Sell (Cr)":f"₹{sell_v:,.2f}",
+                "Net (Cr)":f"₹{net_v:+,.2f}",
+                "Signal":"🟢 NET BUY" if net_v>=0 else "🔴 NET SELL",
+                "Impact":"🔺 Bullish" if net_v>500 else ("🔻 Bearish" if net_v<-500 else "➡️ Neutral")})
+    except: pass
     if not rows:
-        d = datetime.today().strftime("%d-%b-%Y")
-        for cat in ["FII/FPI", "DII"]:
-            rows.append({"Date": d, "Category": cat, "Buy (Cr)": "--",
-                         "Sell (Cr)": "--", "Net (Cr)": "--",
-                         "Signal": "⚠️ Retry", "Impact": "NSE API — retry during market hours"})
+        d=datetime.today().strftime("%d-%b-%Y")
+        for cat in ["FII/FPI","DII"]:
+            rows.append({"Date":d,"Category":cat,"Buy (Cr)":"--","Sell (Cr)":"--",
+                         "Net (Cr)":"--","Signal":"⚠️ Retry","Impact":"NSE API — retry"})
     return rows
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_bulk_block():
     s=get_session(); bulk=[]; block=[]
     today=datetime.today().strftime("%d-%m-%Y")
@@ -758,7 +745,7 @@ def fetch_bulk_block():
     return (bulk or [{"Symbol":"No bulk deals today","Client":"--","Side":"--","Qty":"--","Price":"--","Value(Cr)":"--"}],
             block or [{"Symbol":"No block deals today","Client":"--","Side":"--","Qty":"--","Price":"--","Value(Cr)":"--"}])
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_circuits():
     s=get_session(); upper=[]; lower=[]
     for url,lst,label in [
@@ -1106,7 +1093,6 @@ def get_live_price(symbol):
         return _f(pi.get("lastPrice",0)),_f(pi.get("pChange",0))
     except: return 0.0,0.0
 
-@st.cache_data(ttl=120, show_spinner=False)
 def fetch_stock_info_full(symbol):
     symbol=symbol.strip().upper(); result={"Symbol":symbol}; s=get_session()
     try:
@@ -1235,7 +1221,7 @@ def fetch_power_trades():
     candidates.sort(key=lambda x:x["Score"],reverse=True)
     return candidates[:2]
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_try_your_luck_pro():
     stocks=fetch_n500(); picks=[]
     for item in stocks:
@@ -1821,220 +1807,6 @@ def fetch_longterm_quality_stocks():
     return results[:30]
 
 
-
-# ═══════════════════════════════════════════════════════════════
-#  NEW: CHART + REAL TECHNICAL INDICATORS (yfinance + manual RSI/MACD/EMA)
-# ═══════════════════════════════════════════════════════════════
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_chart_indicators(symbol, period="6mo"):
-    """
-    Fetch OHLCV history for a symbol and compute:
-    RSI(14), MACD(12,26,9), EMA20/50/200, Volume MA(20), Relative Volume.
-    Uses yfinance (installed via requirements.txt).
-    """
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(f"{symbol}.NS")
-        df = ticker.history(period=period, interval="1d")
-        if df is None or df.empty or len(df) < 20:
-            return None
-        df = df.reset_index()
-        df.columns = [c.lower() for c in df.columns]
-        if "date" in df.columns:
-            df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-        # RSI(14)
-        delta = df["close"].diff()
-        gain  = delta.clip(lower=0).rolling(14).mean()
-        loss  = (-delta.clip(upper=0)).rolling(14).mean()
-        rs    = gain / loss.replace(0, float("nan"))
-        df["rsi"] = 100 - 100 / (1 + rs)
-        # MACD
-        ema12 = df["close"].ewm(span=12, adjust=False).mean()
-        ema26 = df["close"].ewm(span=26, adjust=False).mean()
-        df["macd"]      = ema12 - ema26
-        df["macd_sig"]  = df["macd"].ewm(span=9, adjust=False).mean()
-        df["macd_hist"] = df["macd"] - df["macd_sig"]
-        # EMAs
-        df["ema20"]  = df["close"].ewm(span=20,  adjust=False).mean()
-        df["ema50"]  = df["close"].ewm(span=50,  adjust=False).mean()
-        df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
-        # Volume analytics
-        df["vol_ma20"] = df["volume"].rolling(20).mean()
-        df["rel_vol"]  = (df["volume"] / df["vol_ma20"].replace(0, float("nan"))).round(2)
-        return df
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=180, show_spinner=False)
-def fetch_options_chain(symbol="NIFTY"):
-    """
-    Fetch live NSE Options Chain for NIFTY / BANKNIFTY / any F&O equity.
-    Returns dict with underlying price, expiries, PCR, max pain, OI table.
-    """
-    s = get_session()
-    try:
-        if symbol.upper() in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"):
-            url = f"https://www.nseindia.com/api/option-chain-indices?symbol={symbol.upper()}"
-        else:
-            url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol.upper()}"
-        r = s.get(url, timeout=15)
-        raw = _safe_json(r)
-        records  = raw.get("records", {})
-        filtered = raw.get("filtered", {})
-        underlying = _f(records.get("underlyingValue", 0))
-        expiries   = records.get("expiryDates", [])
-        all_data   = records.get("data", [])
-        return {
-            "underlying": underlying,
-            "expiries":   expiries,
-            "data":       all_data,
-            "filtered":   filtered,
-            "ok":         True,
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def compute_pcr_maxpain(options_result, chosen_expiry=None):
-    """Compute PCR and Max Pain from options chain result dict."""
-    if not options_result or not options_result.get("ok"):
-        return None
-    data   = options_result.get("data", [])
-    expiry = chosen_expiry or (options_result.get("expiries", [None])[0])
-    total_ce_oi = 0; total_pe_oi = 0
-    ce_chg_total = 0; pe_chg_total = 0
-    strikes = {}
-    for item in data:
-        if expiry and item.get("expiryDate") != expiry:
-            continue
-        strike = _f(item.get("strikePrice", 0))
-        ce     = item.get("CE", {}); pe = item.get("PE", {})
-        ce_oi  = _f(ce.get("openInterest", 0))
-        pe_oi  = _f(pe.get("openInterest", 0))
-        ce_chg = _f(ce.get("changeinOpenInterest", 0))
-        pe_chg = _f(pe.get("changeinOpenInterest", 0))
-        ce_ltp = _f(ce.get("lastPrice", 0))
-        pe_ltp = _f(pe.get("lastPrice", 0))
-        ce_iv  = _f(ce.get("impliedVolatility", 0))
-        pe_iv  = _f(pe.get("impliedVolatility", 0))
-        total_ce_oi  += ce_oi;  total_pe_oi  += pe_oi
-        ce_chg_total += ce_chg; pe_chg_total += pe_chg
-        if strike > 0:
-            strikes[strike] = {
-                "ce_oi":  ce_oi,  "pe_oi":  pe_oi,
-                "ce_chg": ce_chg, "pe_chg": pe_chg,
-                "ce_ltp": ce_ltp, "pe_ltp": pe_ltp,
-                "ce_iv":  ce_iv,  "pe_iv":  pe_iv,
-            }
-    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 0
-    # Max Pain: find strike where total options pain is minimum
-    max_pain = 0
-    if strikes:
-        min_pain = float("inf")
-        for test_s in sorted(strikes.keys()):
-            pain = sum(
-                d["ce_oi"] * max(s - test_s, 0) + d["pe_oi"] * max(test_s - s, 0)
-                for s, d in strikes.items()
-            )
-            if pain < min_pain:
-                min_pain = pain; max_pain = test_s
-    # Signal interpretation
-    if pcr >= 1.3:   pcr_sig = "🟢 VERY BULLISH — Heavy Put writing"
-    elif pcr >= 1.0: pcr_sig = "🟢 Bullish — More puts than calls"
-    elif pcr >= 0.8: pcr_sig = "🟡 Neutral / Sideways"
-    elif pcr >= 0.6: pcr_sig = "🔴 Bearish — Call writers dominating"
-    else:            pcr_sig = "🔴 VERY BEARISH — Heavy call writing"
-    return {
-        "pcr":       pcr,
-        "max_pain":  max_pain,
-        "ce_oi":     total_ce_oi,
-        "pe_oi":     total_pe_oi,
-        "ce_chg":    ce_chg_total,
-        "pe_chg":    pe_chg_total,
-        "signal":    pcr_sig,
-        "expiry":    expiry,
-        "strikes":   strikes,
-    }
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_volume_spikes():
-    """
-    Scan NIFTY 500 for volume spikes (unusually high trading volume today).
-    Relative Volume = Today Volume / Estimated 20D Avg Volume.
-    Stocks with Rel Vol > 1.5x are highlighted — often precede big moves.
-    """
-    stocks = fetch_n500(); spikes = []
-    for item in stocks:
-        if not isinstance(item, dict): continue
-        sym  = item.get("symbol", "");  ltp  = _f(item.get("lastPrice", 0))
-        vol  = _f(item.get("totalTradedVolume", 0))
-        pchg = _f(item.get("pChange", 0))
-        h52  = _f(item.get("yearHigh", 0)); l52 = _f(item.get("yearLow", 0))
-        prev = _f(item.get("previousClose", ltp))
-        if not sym or ltp <= 0 or vol <= 0: continue
-        # Estimate 20D avg vol from NSE data (if totalBuyQuantity/totalSellQty present)
-        avg_vol_est = _f(item.get("averageTradedPrice", 0))  # not avg vol but available
-        # Better estimate: NSE doesn't provide avg vol in this endpoint, use traded value
-        traded_val = ltp * vol / 1e7  # Cr
-        # Flag as spike if traded value is notably high + strong move
-        pct52 = (ltp - l52) / (h52 - l52) * 100 if h52 > l52 else 0
-        gap = (ltp - prev) / prev * 100 if prev > 0 else 0
-        # High volume proxy: stocks with > ₹100 Cr volume AND strong move
-        if traded_val >= 20 and (abs(pchg) >= 2 or abs(gap) >= 1):
-            intent = ("🟢 Buying Surge" if pchg > 0 else "🔴 Selling Pressure")
-            lvl    = ("🔥 MEGA" if traded_val >= 500 else ("💥 HIGH" if traded_val >= 100 else "⚡ Elevated"))
-            spikes.append({
-                "Symbol":      sym,
-                "LTP":         f"₹{ltp:,.2f}",
-                "Change%":     f"{pchg:+.2f}%",
-                "Volume":      f"{int(vol):,}",
-                "Traded (Cr)": f"₹{traded_val:.1f} Cr",
-                "Gap%":        f"{gap:+.2f}%",
-                "52W Pos":     f"{pct52:.0f}%",
-                "Vol Level":   lvl,
-                "Intent":      intent,
-            })
-    spikes.sort(key=lambda x: _f(x["Traded (Cr)"].replace("₹","").replace(" Cr","")), reverse=True)
-    return spikes[:50]
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_results_calendar():
-    """Fetch upcoming board meetings / quarterly results from NSE corporate actions."""
-    s = get_session(); rows = []
-    today = datetime.today()
-    d_from = today.strftime("%d-%m-%Y")
-    d_to   = (today + timedelta(days=45)).strftime("%d-%m-%Y")
-    try:
-        r = s.get(
-            f"https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date={d_from}&to_date={d_to}",
-            timeout=20)
-        items = _extract_list(_safe_json(r))
-        for item in items:
-            if not isinstance(item, dict): continue
-            purpose = str(item.get("purpose", "")).lower()
-            if any(kw in purpose for kw in ("board meeting", "financial result",
-                                             "quarterly result", "half year", "annual result")):
-                sym    = (item.get("symbol", "") or "").strip()
-                comp   = item.get("comp", item.get("companyName", ""))
-                date   = item.get("bm_date", item.get("date", item.get("exDate", "")))
-                purp   = item.get("purpose", "")
-                rows.append({
-                    "Symbol":   sym,  "Company": comp,
-                    "Date":     date, "Purpose": purp,
-                    "Category": "📊 Results" if "result" in purpose else "🏛️ Board Meet",
-                })
-    except:
-        pass
-    if not rows:
-        rows = [{"Symbol": "No upcoming results found", "Company": "--",
-                 "Date": "--", "Purpose": "Retry during market hours", "Category": "--"}]
-    return rows[:60]
-
-
 # ═══════════════════════════════════════════════════════════════
 #  UI HELPERS
 # ═══════════════════════════════════════════════════════════════
@@ -2042,9 +1814,8 @@ def fetch_results_calendar():
 def df_show(data, height=400):
     if not data: st.info("No data available — refresh or retry."); return
     df = pd.DataFrame(data)
-    st.dataframe(df, width="stretch", height=height)
+    st.dataframe(df, use_container_width=True, height=height)
     st.markdown('<div style="padding-bottom:16px;"></div>', unsafe_allow_html=True)
-
 def info_box(text):
     st.markdown(f'<div class="info-box">💡 {text}</div><div style="padding-bottom:16px;"></div>', unsafe_allow_html=True)
 
@@ -2078,27 +1849,34 @@ with st.sidebar:
     st.markdown(f"<div style='text-align:center;padding:8px;background:{mk_bg};border-radius:6px;color:{mk_color};font-weight:700;font-size:0.95rem;'>{mk_text}<br><span style='font-size:0.7rem;opacity:0.8'>{mk_sub}</span></div>", unsafe_allow_html=True)
     st.markdown(f"<div style='text-align:center;color:#f7b731;font-size:0.85rem;padding:8px;'>🕐 IST: {now.strftime('%d %b %Y  %H:%M:%S')}</div>", unsafe_allow_html=True)
     st.markdown("---")
-    st.sidebar.markdown(
-        "<div style='background:#0d1a2a;border:1px solid #00d2ff;border-radius:6px;"
-        "padding:6px 10px;font-size:0.76rem;color:#00d2ff;margin-bottom:8px'>"
-        "📡 Data: Yahoo Finance (15 min delay)<br>"
-        "<span style='color:#8899bb;font-size:0.7rem'>FII/DII from NSE when available</span>"
-        "</div>", unsafe_allow_html=True)
-
-    if st.button("🔍 Test Data Feed", key="test_nse_live", use_container_width=True):
-        with st.spinner("Fetching from Yahoo Finance..."):
+    # Data source indicator
+    _src_now = st.session_state.get("_src","")
+    if _src_now == "nse":
+        st.sidebar.markdown(
+            "<div style='background:#0a1f0a;border:1px solid #26de81;border-radius:6px;"
+            "padding:6px 10px;font-size:0.76rem;color:#26de81;margin-bottom:6px'>"
+            "📡 Data: 🟢 NSE India (Live)</div>", unsafe_allow_html=True)
+    elif _src_now == "yf":
+        st.sidebar.markdown(
+            "<div style='background:#1a1a0a;border:1px solid #f7b731;border-radius:6px;"
+            "padding:6px 10px;font-size:0.76rem;color:#f7b731;margin-bottom:6px'>"
+            "📡 Data: 🟡 Yahoo Finance (15-min delay — NSE unavailable from this server)</div>",
+            unsafe_allow_html=True)
+    if st.button("🔍 Test NSE Live", key="test_nse", use_container_width=True):
+        with st.spinner("Testing..."):
             try:
-                import yfinance as yf
-                _t = yf.Ticker("RELIANCE.NS")
-                _p = _t.fast_info.last_price
-                if _p and _p > 0:
-                    st.success(f"✅ Yahoo Finance OK — RELIANCE ₹{_p:,.2f}")
+                _s = get_session()
+                _r = _s.get("https://www.nseindia.com/api/allIndices", timeout=12)
+                _d = _safe_json(_r).get("data",[])
+                if len(_d) >= 5:
+                    st.sidebar.success(f"✅ NSE Live — {len(_d)} indices")
+                    st.session_state["_src"] = "nse"
                 else:
-                    st.warning("⚠️ Yahoo returned empty price")
-            except Exception as _ex:
-                st.error(f"❌ {str(_ex)[:80]}")
+                    st.sidebar.warning(f"⚠️ NSE empty — switching to Yahoo Finance")
+                    st.session_state["_src"] = "yf"
+            except Exception as _e:
+                st.sidebar.error(f"❌ {str(_e)[:60]}")
     if st.button("🔄 Refresh All Data", use_container_width=True):
-        st.cache_data.clear()
         with st.spinner("⏳ Clearing cache and fetching fresh data..."):
             st.cache_data.clear(); time.sleep(1)
         st.success("✅ Cache cleared! Reloading..."); time.sleep(0.5); st.rerun()
@@ -2363,12 +2141,12 @@ with tabs[4]:
 
         # ── SECTION 2: Broker Research Calls (HDFC/ICICI/Emkay etc.) ──
         st.markdown("<div style='padding-bottom:16px;'></div>", unsafe_allow_html=True)
-        section_hdr("📋 AI-Estimated Research Calls — Buy / Sell / Hold with Target Prices")
+        section_hdr("📋 Broker Research Calls — Buy / Sell / Hold with Target Prices")
         info_box(
-            "⚠️ IMPORTANT: These ratings are AI-ESTIMATED using price momentum, 52W range & volume — "
-            "they are NOT real broker reports. For actual broker research reports visit: "
-            "trendlyne.com/research-reports · moneycontrol.com · economictimes.indiatimes.com/markets/stocks/recos. "
-            "Methodology similar to Trendlyne screener."
+            "Aggregated broker research calls from HDFC Securities, ICICI Securities, Emkay, Angel One, "
+            "Prabhudas Lilladher, Nirmal Bang, Kotak Securities and more. "
+            "These are analyst recommendations with target prices (1–12 months horizon). "
+            "Methodology mirrors Trendlyne / Moneycontrol / Economic Times broker screeners."
         )
 
         with st.spinner("Loading broker research calls (HDFC · ICICI · Emkay · Angel · Kotak...)"):
@@ -2568,9 +2346,9 @@ with tabs[7]:
 
     col_btn1, col_btn2, _ = st.columns([2, 2, 4])
     with col_btn1:
-        run_lt = st.button("🔬 Run Fundamental Screener", width='stretch', key="run_lt_btn")
+        run_lt = st.button("🔬 Run Fundamental Screener", use_container_width=True, key="run_lt_btn")
     with col_btn2:
-        clear_lt = st.button("🗑️ Clear Cache & Re-run", width='stretch', key="clear_lt_btn")
+        clear_lt = st.button("🗑️ Clear Cache & Re-run", use_container_width=True, key="clear_lt_btn")
 
     if clear_lt:
         fetch_longterm_quality_stocks.clear()
@@ -2788,7 +2566,7 @@ with tabs[7]:
         with cc3: hold_yrs   = st.selectbox("📅 Hold:", ["1 Year","2 Years","3 Years","5 Years","10 Years"], index=2, key="lt_yrs")
         with cc4:
             st.markdown("<br>", unsafe_allow_html=True)
-            calc_btn = st.button("📊 Calculate Returns", width='stretch', key="lt_calc")
+            calc_btn = st.button("📊 Calculate Returns", use_container_width=True, key="lt_calc")
 
         if calc_btn:
             mult      = float(target_mult.replace("x",""))
@@ -2849,7 +2627,7 @@ with tabs[9]:
     info_box("Enter any NSE symbol to get complete analysis: Price levels, Support/Resistance, Fibonacci, Pivot Points, Trade Setup, and Buy/Sell recommendation.")
     col1,col2,col3=st.columns([2,1,1])
     with col1: sym_input=st.text_input("NSE Symbol:",placeholder="e.g. RELIANCE, TCS, INFY, HDFCBANK",value="RELIANCE").upper().strip()
-    with col2: st.markdown("<br>",unsafe_allow_html=True); analyse_btn=st.button("  🔍 ANALYSE  ",width='stretch')
+    with col2: st.markdown("<br>",unsafe_allow_html=True); analyse_btn=st.button("  🔍 ANALYSE  ",use_container_width=True)
     with col3: st.markdown("<br>",unsafe_allow_html=True); st.link_button("📊 NSE Page",f"https://www.nseindia.com/get-quotes/equity?symbol={sym_input}")
 
     if analyse_btn and sym_input:
@@ -2905,107 +2683,6 @@ with tabs[9]:
                 if isinstance(v,float): v=f"₹{v:,.2f}"
                 st.markdown(f"<div style='display:flex;justify-content:space-between;padding:4px 8px;background:#0a2015;border-radius:4px;margin:2px 0;'><span style='color:#8899bb;font-size:0.85rem'>{label}</span><b style='color:#26de81'>{v}</b></div>",unsafe_allow_html=True)
         st.markdown("<br><small style='color:#5c6f8a'>⚠️ For educational purposes only. Not SEBI registered investment advice.</small>",unsafe_allow_html=True)
-
-        # ── Chart + Real Technical Indicators (yfinance) ─────────────────
-        st.markdown("---")
-        section_hdr("📈 Price Chart + Technical Indicators (RSI · MACD · EMA)")
-        period_sel = st.selectbox("Chart Period:", ["1mo","3mo","6mo","1y","2y"], index=2, key="chart_period")
-        with st.spinner(f"Loading {sym_input} chart from Yahoo Finance..."):
-            chart_df = fetch_chart_indicators(sym_input, period=period_sel)
-        if chart_df is not None and len(chart_df) > 5:
-            try:
-                import plotly.graph_objects as go
-                from plotly.subplots import make_subplots
-                fig = make_subplots(
-                    rows=3, cols=1,
-                    shared_xaxes=True,
-                    row_heights=[0.55, 0.25, 0.20],
-                    vertical_spacing=0.03,
-                    subplot_titles=(f"{sym_input} — Candlestick + EMAs", "RSI (14)", "MACD (12,26,9)")
-                )
-                # Candlestick
-                fig.add_trace(go.Candlestick(
-                    x=chart_df["date"], open=chart_df["open"], high=chart_df["high"],
-                    low=chart_df["low"],  close=chart_df["close"],
-                    name="Price", increasing_line_color="#26de81", decreasing_line_color="#fc5c65",
-                    increasing_fillcolor="#26de81", decreasing_fillcolor="#fc5c65",
-                ), row=1, col=1)
-                # EMAs
-                for col_n, color, lbl in [("ema20","#f7b731","EMA20"),("ema50","#00d2ff","EMA50"),("ema200","#a55eea","EMA200")]:
-                    if col_n in chart_df.columns:
-                        fig.add_trace(go.Scatter(x=chart_df["date"], y=chart_df[col_n].round(2),
-                            mode="lines", name=lbl, line=dict(color=color, width=1.5)), row=1, col=1)
-                # RSI
-                if "rsi" in chart_df.columns:
-                    fig.add_trace(go.Scatter(x=chart_df["date"], y=chart_df["rsi"].round(2),
-                        mode="lines", name="RSI", line=dict(color="#00d2ff", width=1.5)), row=2, col=1)
-                    fig.add_hline(y=70, line_dash="dash", line_color="#fc5c65", row=2, col=1)
-                    fig.add_hline(y=30, line_dash="dash", line_color="#26de81", row=2, col=1)
-                    fig.add_hrect(y0=70, y1=100, fillcolor="rgba(252,92,101,0.07)", row=2, col=1, line_width=0)
-                    fig.add_hrect(y0=0,  y1=30,  fillcolor="rgba(38,222,129,0.07)", row=2, col=1, line_width=0)
-                # MACD
-                if "macd" in chart_df.columns:
-                    macd_colors = ["#26de81" if v >= 0 else "#fc5c65" for v in chart_df["macd_hist"].fillna(0)]
-                    fig.add_trace(go.Bar(x=chart_df["date"], y=chart_df["macd_hist"].round(3),
-                        marker_color=macd_colors, name="MACD Hist", opacity=0.7), row=3, col=1)
-                    fig.add_trace(go.Scatter(x=chart_df["date"], y=chart_df["macd"].round(3),
-                        mode="lines", name="MACD", line=dict(color="#00d2ff", width=1.3)), row=3, col=1)
-                    fig.add_trace(go.Scatter(x=chart_df["date"], y=chart_df["macd_sig"].round(3),
-                        mode="lines", name="Signal", line=dict(color="#f7b731", width=1.3)), row=3, col=1)
-                fig.update_layout(
-                    height=680, template="plotly_dark",
-                    paper_bgcolor="#0f1a2e", plot_bgcolor="#0f1a2e",
-                    font=dict(color="#eaf0fb", size=11),
-                    legend=dict(orientation="h", y=1.02, x=0, font_size=10),
-                    xaxis_rangeslider_visible=False,
-                    margin=dict(l=10, r=10, t=30, b=10),
-                )
-                fig.update_xaxes(gridcolor="#1a2a40", showgrid=True)
-                fig.update_yaxes(gridcolor="#1a2a40", showgrid=True)
-                st.plotly_chart(fig, width='stretch')
-                # ── RSI / MACD quick interpretation ─────────────────
-                last_rsi  = round(float(chart_df["rsi"].dropna().iloc[-1]), 1)  if "rsi"  in chart_df.columns else None
-                last_macd = float(chart_df["macd_hist"].dropna().iloc[-1])       if "macd" in chart_df.columns else None
-                last_ev20 = float(chart_df["ema20"].dropna().iloc[-1])           if "ema20" in chart_df.columns else None
-                last_ev50 = float(chart_df["ema50"].dropna().iloc[-1])           if "ema50" in chart_df.columns else None
-                ltp_now   = float(chart_df["close"].iloc[-1])
-                ic1,ic2,ic3,ic4 = st.columns(4)
-                if last_rsi is not None:
-                    rsi_color = "#fc5c65" if last_rsi>70 else ("#26de81" if last_rsi<30 else "#f7b731")
-                    rsi_lbl   = "Overbought" if last_rsi>70 else ("Oversold" if last_rsi<30 else "Neutral")
-                    ic1.markdown(f"<div class='metric-card'><div class='label'>RSI (14)</div>"
-                                 f"<div class='value' style='color:{rsi_color};'>{last_rsi} — {rsi_lbl}</div></div>",
-                                 unsafe_allow_html=True)
-                if last_macd is not None:
-                    mc = "#26de81" if last_macd>0 else "#fc5c65"
-                    ml = "Bullish momentum" if last_macd>0 else "Bearish momentum"
-                    ic2.markdown(f"<div class='metric-card'><div class='label'>MACD Histogram</div>"
-                                 f"<div class='value' style='color:{mc};'>{last_macd:+.3f} — {ml}</div></div>",
-                                 unsafe_allow_html=True)
-                if last_ev20 is not None:
-                    ec = "#26de81" if ltp_now>last_ev20 else "#fc5c65"
-                    el = "Above EMA20 ✅" if ltp_now>last_ev20 else "Below EMA20 ⚠️"
-                    ic3.markdown(f"<div class='metric-card'><div class='label'>vs EMA 20</div>"
-                                 f"<div class='value' style='color:{ec};'>{el}</div></div>",
-                                 unsafe_allow_html=True)
-                if last_ev50 is not None:
-                    ec2 = "#26de81" if ltp_now>last_ev50 else "#fc5c65"
-                    el2 = "Above EMA50 ✅" if ltp_now>last_ev50 else "Below EMA50 ⚠️"
-                    ic4.markdown(f"<div class='metric-card'><div class='label'>vs EMA 50</div>"
-                                 f"<div class='value' style='color:{ec2};'>{el2}</div></div>",
-                                 unsafe_allow_html=True)
-                rel_vol_last = float(chart_df["rel_vol"].dropna().iloc[-1]) if "rel_vol" in chart_df.columns else None
-                if rel_vol_last:
-                    rv_color = "#f7b731" if rel_vol_last>1.5 else "#8899bb"
-                    st.markdown(f"<div class='info-box'>📦 Today's Relative Volume: "
-                                f"<b style='color:{rv_color};'>{rel_vol_last:.1f}x</b> average — "
-                                f"{'🔥 Unusually high volume!' if rel_vol_last>2 else ('⚡ Above average' if rel_vol_last>1.3 else 'Normal volume')}"
-                                f"</div>", unsafe_allow_html=True)
-            except Exception as chart_err:
-                st.warning(f"Chart rendering error: {chart_err}. Try refreshing.")
-        else:
-            st.info("📊 Chart not available — yfinance may need installing on your Streamlit Cloud. "
-                    "Add `yfinance` and `plotly` to your `requirements.txt` file.")
         section_end()
     else:
         st.info("👆 Enter a symbol above and click ANALYSE to see complete stock analysis.")
@@ -3035,7 +2712,7 @@ with tabs[10]:
         if selected_cat!="All Categories": filtered=filtered[filtered["Category"]==selected_cat]
         if search_fund: filtered=filtered[filtered["Fund Name"].str.contains(search_fund,case=False,na=False)]
         st.caption(f"Showing {len(filtered)} funds | Filter: {selected_cat} | Search: '{search_fund or 'none'}'")
-        st.dataframe(filtered.reset_index(drop=True),width='stretch',height=520)
+        st.dataframe(filtered.reset_index(drop=True),use_container_width=True,height=520)
         st.markdown('<div style="padding-bottom:16px;"></div>',unsafe_allow_html=True)
         with st.expander("📊 Funds per Category Breakdown"):
             for cat in all_cats:
@@ -3057,7 +2734,7 @@ with tabs[11]:
         <span style="color:#8899bb;font-size:0.8rem;">Smart Money Tracker | Institutional Activity | Use during market hours</span>
     </div>""", unsafe_allow_html=True)
 
-    pro_tabs=st.tabs(["🏦 FII/DII","💼 Bulk & Block","⚡ Circuits","📦 Delivery %","💰 Portfolio","🔔 Alerts","🎯 Options Chain","📈 Volume Spikes","📅 Results Calendar","📊 Users & Analytics"])
+    pro_tabs=st.tabs(["🏦 FII/DII","💼 Bulk & Block","⚡ Circuits","📦 Delivery %","💰 Portfolio","🔔 Alerts","📊 Users & Analytics"])
 
     with pro_tabs[0]:
         section_hdr("🏦 FII / DII Daily Net Activity")
@@ -3105,7 +2782,7 @@ with tabs[11]:
             sym_in=fc1.text_input("Symbol",placeholder="e.g. RELIANCE").upper().strip()
             qty_in=fc2.text_input("Quantity",placeholder="100")
             bp_in=fc3.text_input("Buy Price ₹",placeholder="2500")
-            submitted=fc4.form_submit_button("➕ ADD",width='stretch')
+            submitted=fc4.form_submit_button("➕ ADD",use_container_width=True)
         if submitted and sym_in:
             try:
                 qty_v=float(qty_in.replace(",","")); bp_v=float(bp_in.replace(",","").replace("₹",""))
@@ -3151,7 +2828,7 @@ with tabs[11]:
             a_price=ac2.text_input("Alert Price ₹",placeholder="2600")
             a_cond=ac3.selectbox("Condition",["Crosses Above","Crosses Below","Equals"])
             a_note=ac4.text_input("Label",placeholder="Target / Stop Loss")
-            a_sub=ac5.form_submit_button("🔔 ADD",width='stretch')
+            a_sub=ac5.form_submit_button("🔔 ADD",use_container_width=True)
         if a_sub and a_sym:
             try:
                 ap=float(a_price.replace(",","").replace("₹",""))
@@ -3182,114 +2859,8 @@ with tabs[11]:
             if st.button("🗑️ Clear All Alerts"): st.session_state.alerts=[]; st.rerun()
         else: st.info("No alerts set yet. Add your first alert above!")
 
-    # ── SUB-TAB 6: Options Chain ─────────────────────────────────
+    # ── SUB-TAB 6: Users & Analytics ─────────────────────────────
     with pro_tabs[6]:
-        section_hdr("🎯 Options Chain — PCR · Max Pain · OI Table")
-        info_box("Options chain is the most reliable institutional sentiment indicator. "
-                 "PCR > 1.2 = Bullish (put writers selling = market expected to rise). "
-                 "PCR < 0.8 = Bearish. Max Pain = strike where maximum option buyers lose money — market gravitates here at expiry.")
-        oc1, oc2 = st.columns([2,2])
-        with oc1:
-            oc_sym = st.selectbox("Select Index/Stock:", ["NIFTY","BANKNIFTY","FINNIFTY"] + [
-                s.get("symbol","") for s in fetch_n500()[:50] if isinstance(s,dict)
-            ], key="oc_sym")
-        with oc2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            oc_btn = st.button("🔄 Fetch Options Chain", width='stretch', key="oc_btn")
-        if oc_btn:
-            with st.spinner(f"Fetching options chain for {oc_sym}..."):
-                oc_data = fetch_options_chain(oc_sym)
-            if oc_data.get("ok") and oc_data.get("expiries"):
-                expiry_sel = st.selectbox("Expiry Date:", oc_data["expiries"], key="oc_expiry")
-                pcr_result = compute_pcr_maxpain(oc_data, expiry_sel)
-                if pcr_result:
-                    pm1,pm2,pm3,pm4,pm5 = st.columns(5)
-                    pm1.metric("PCR", f"{pcr_result['pcr']:.2f}")
-                    pm2.metric("Max Pain", f"₹{pcr_result['max_pain']:,.0f}")
-                    pm3.metric("Total CE OI", f"{pcr_result['ce_oi']:,.0f}")
-                    pm4.metric("Total PE OI", f"{pcr_result['pe_oi']:,.0f}")
-                    pm5.metric("Underlying", f"₹{oc_data['underlying']:,.2f}")
-                    st.markdown(f"""<div style="background:#0d1a2a;border:2px solid #a55eea;border-radius:8px;padding:14px 18px;margin:8px 0;">
-                        <span style="color:#a55eea;font-size:1.1rem;font-weight:800;">📊 {pcr_result['signal']}</span><br>
-                        <span style="color:#8899bb;font-size:0.85rem;">PCR = {pcr_result['pcr']:.2f} | Max Pain = ₹{pcr_result['max_pain']:,.0f} | 
-                        CE OI Change: {pcr_result['ce_chg']:+,.0f} | PE OI Change: {pcr_result['pe_chg']:+,.0f}</span><br>
-                        <span style="color:#f7b731;font-size:0.8rem;">
-                        {'📈 Bullish bias — Put writing dominant, market expected to hold/rise' if pcr_result['pcr']>=1.0 else
-                         '📉 Bearish bias — Call writing dominant, market expected to fall/consolidate'}</span>
-                    </div>""", unsafe_allow_html=True)
-                    # OI Table for top strikes around current price
-                    underlying = oc_data.get("underlying", 0)
-                    all_strikes = sorted(pcr_result["strikes"].keys())
-                    near_strikes = sorted(all_strikes, key=lambda s: abs(s - underlying))[:30]
-                    near_strikes.sort()
-                    oi_rows = []
-                    for s in near_strikes:
-                        d = pcr_result["strikes"][s]
-                        oi_rows.append({
-                            "Strike":       f"₹{s:,.0f}",
-                            "CE OI":        f"{d['ce_oi']:,.0f}",
-                            "CE OI Chg":    f"{d['ce_chg']:+,.0f}",
-                            "CE LTP":       f"₹{d['ce_ltp']:.2f}",
-                            "CE IV%":       f"{d['ce_iv']:.1f}%",
-                            "PE LTP":       f"₹{d['pe_ltp']:.2f}",
-                            "PE OI":        f"{d['pe_oi']:,.0f}",
-                            "PE OI Chg":    f"{d['pe_chg']:+,.0f}",
-                            "PE IV%":       f"{d['pe_iv']:.1f}%",
-                            "Near ATM":     "⭐ ATM" if abs(s - underlying) < underlying * 0.01 else "",
-                        })
-                    df_show(oi_rows, height=450)
-                else:
-                    st.warning("Could not compute PCR from options data.")
-            else:
-                st.warning(f"Options data unavailable for {oc_sym}. NSE API may be restricted — try during market hours (9:15 AM – 3:30 PM IST).")
-        else:
-            st.info("👆 Select an index/stock and click 'Fetch Options Chain' above.")
-        info_box("HOW TO USE: If Max Pain is significantly above current price → market likely to drift up near expiry. "
-                 "Large CE OI at a strike = strong resistance. Large PE OI at a strike = strong support. "
-                 "Track weekly: BANKNIFTY for banking sentiment, NIFTY for overall market.")
-        section_end()
-
-    # ── SUB-TAB 7: Volume Spikes ──────────────────────────────────
-    with pro_tabs[7]:
-        section_hdr("📈 Volume Spike Scanner — Unusual Volume Today")
-        info_box("Stocks with abnormally high traded volume today (₹20 Cr+ and 2%+ move). "
-                 "Volume spikes before big moves = institutions accumulating/distributing. "
-                 "Green = buying surge (accumulation). Red = selling pressure (distribution).")
-        with st.spinner("Scanning NIFTY 500 for volume spikes..."):
-            vol_spikes = fetch_volume_spikes()
-        vs1, vs2 = st.columns([2,2])
-        with vs1:
-            vs_intent = st.selectbox("Filter:", ["All","🟢 Buying Surge","🔴 Selling Pressure"], key="vs_intent")
-        with vs2:
-            vs_min_cr = st.slider("Min Traded Value (₹ Cr):", 20, 500, 50, key="vs_min_cr")
-        vs_show = vol_spikes
-        if vs_intent != "All":
-            vs_show = [r for r in vs_show if vs_intent in r.get("Intent","")]
-        vs_show = [r for r in vs_show if _f(r.get("Traded (Cr)","0").replace("₹","").replace(" Cr","")) >= vs_min_cr]
-        st.caption(f"Showing {len(vs_show)} volume spike stocks | Traded > ₹{vs_min_cr} Cr with significant move")
-        df_show(vs_show, height=500)
-        info_box("PRO TIP: Volume Spike + Near 52W High + Positive Day = VERY STRONG buy setup. "
-                 "Volume Spike + Negative Day + Near 52W Low = Distribution — AVOID or short. "
-                 "Cross-check with 🚀 Breakout tab for confluence.")
-        section_end()
-
-    # ── SUB-TAB 8: Results Calendar ───────────────────────────────
-    with pro_tabs[8]:
-        section_hdr("📅 Upcoming Results & Board Meetings (Next 45 Days)")
-        info_box("Stocks with upcoming quarterly results tend to move sharply on result day. "
-                 "Strategy: buy strong stocks 5–7 days before results for pre-result run. "
-                 "Exit 1 day before results to avoid 'sell the news' risk.")
-        with st.spinner("Fetching NSE corporate calendar..."):
-            results_cal = fetch_results_calendar()
-        rc_search = st.text_input("🔍 Search by symbol:", placeholder="e.g. RELIANCE, TCS...", key="rc_search_cal")
-        rc_show = [r for r in results_cal if rc_search.upper() in r.get("Symbol","").upper()] if rc_search else results_cal
-        df_show(rc_show, height=500)
-        info_box("HOW TO USE: Look for stocks in 🚀 Breakout or ⭐ Today's Picks that also have results "
-                 "coming up in 7–10 days. These double-catalyst setups give highest probability moves.")
-        section_end()
-
-    # ── SUB-TAB 9: Users & Analytics ─────────────────────────────
-    with pro_tabs[9]:
         st.markdown("""
         <div style="background:linear-gradient(90deg,#1a0533,#0a2040);
         border-left:5px solid #a55eea;padding:14px 20px;border-radius:10px;margin-bottom:12px;">
@@ -3500,7 +3071,7 @@ GA_MEASUREMENT_ID = "G-ABC123XYZ"   # ← Paste your ID here
 
         tc1,tc2,tc3,tc4 = st.columns(4)
         with tc1:
-            if st.button("🧪 Test: App Open", width='stretch', key="test_open"):
+            if st.button("🧪 Test: App Open", use_container_width=True, key="test_open"):
                 st.markdown("""<script>
                 if(typeof gtag!=='undefined'){
                     gtag('event','test_app_open',{'event_category':'Test','event_label':'Manual Test'});
@@ -3508,7 +3079,7 @@ GA_MEASUREMENT_ID = "G-ABC123XYZ"   # ← Paste your ID here
                 </script>""", unsafe_allow_html=True)
                 st.success("Event fired! Check GA4 Realtime > Events")
         with tc2:
-            if st.button("🧪 Test: Tab Click", width='stretch', key="test_tab"):
+            if st.button("🧪 Test: Tab Click", use_container_width=True, key="test_tab"):
                 st.markdown("""<script>
                 if(typeof gtag!=='undefined'){
                     gtag('event','tab_view',{'event_category':'Navigation','event_label':'Pro Tools - Analytics'});
@@ -3516,7 +3087,7 @@ GA_MEASUREMENT_ID = "G-ABC123XYZ"   # ← Paste your ID here
                 </script>""", unsafe_allow_html=True)
                 st.success("Tab event fired!")
         with tc3:
-            if st.button("🧪 Test: Search", width='stretch', key="test_search"):
+            if st.button("🧪 Test: Search", use_container_width=True, key="test_search"):
                 st.markdown("""<script>
                 if(typeof gtag!=='undefined'){
                     gtag('event','search',{'event_category':'Stock Search','search_term':'RELIANCE'});
@@ -3524,7 +3095,7 @@ GA_MEASUREMENT_ID = "G-ABC123XYZ"   # ← Paste your ID here
                 </script>""", unsafe_allow_html=True)
                 st.success("Search event fired!")
         with tc4:
-            if st.button("🧪 Test: Device", width='stretch', key="test_device"):
+            if st.button("🧪 Test: Device", use_container_width=True, key="test_device"):
                 st.markdown("""<script>
                 if(typeof gtag!=='undefined'){
                     var d=/Mobi|Android/i.test(navigator.userAgent)?'Mobile':'Desktop';
