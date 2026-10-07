@@ -6,9 +6,4 @@ yfinance>=0.2.36
 urllib3>=2.0.0
 cloudscraper>=1.2.71
 
-streamlit==1.65.0
-yfinance==1.7.0
-pandas>=2.2,<3.1
-numpy>=1.26,<3
-requests>=2.31
-pytz>=2024.1
+
