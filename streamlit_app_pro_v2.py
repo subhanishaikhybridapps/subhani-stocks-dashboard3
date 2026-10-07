@@ -458,168 +458,6 @@ def color_change(val):
 #  DATA FETCHERS
 # ═══════════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════════
-#  MARKET REGIME + EARLY-STAGE FEATURES   (added in this revision)
-#  Fixes two problems:
-#   1) targets fail when the market falls  -> Nifty trend filter gates long signals
-#   2) signals appear after the rally      -> penalise stocks that already ran,
-#                                             reward pullback / coil / day-1 breakout
-# ═══════════════════════════════════════════════════════════════
-def stock_features(df):
-    """Extension + early-stage features from a daily OHLCV frame. {} if too short."""
-    try:
-        df = df.dropna(subset=["Close"])
-        if len(df) < 60:
-            return {}
-        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
-        ltp = float(c.iloc[-1])
-        if ltp <= 0:
-            return {}
-        ema9 = c.ewm(span=9, adjust=False).mean()
-        ema21 = c.ewm(span=21, adjust=False).mean()
-        ema50 = c.ewm(span=50, adjust=False).mean()
-        prev_c = c.shift(1)
-        tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-        atr14 = float(tr.rolling(14).mean().iloc[-1])
-        if pd.isna(atr14) or atr14 <= 0:
-            atr14 = ltp * 0.02
-        rng = h - l
-        nr7 = bool(float(rng.iloc[-1]) <= float(rng.tail(7).min()) + 1e-9)
-        day_rng = float(h.iloc[-1] - l.iloc[-1])
-        close_pos = (ltp - float(l.iloc[-1])) / day_rng if day_rng > 0 else 0.5
-        high20_prev = float(h.iloc[-21:-1].max())
-        avg_v = float(v.tail(20).mean())
-        vol_ratio = float(v.iloc[-1]) / avg_v if avg_v > 0 else 1.0
-        delta = c.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rsi = float((100 - (100 / (1 + gain / loss.replace(0, 0.001)))).iloc[-1])
-        h52 = float(h.max())
-        return {
-            "ltp": ltp,
-            "ema9": float(ema9.iloc[-1]), "ema21": float(ema21.iloc[-1]),
-            "ema50": float(ema50.iloc[-1]),
-            "atr14": atr14, "nr7": nr7, "close_pos": close_pos,
-            "high20_prev": high20_prev, "vol_ratio": vol_ratio, "rsi": rsi,
-            "ret3": (ltp / float(c.iloc[-4]) - 1) * 100,
-            "ret5": (ltp / float(c.iloc[-6]) - 1) * 100,
-            "ret20": (ltp / float(c.iloc[-21]) - 1) * 100,
-            "ext21": (ltp / float(ema21.iloc[-1]) - 1) * 100,
-            "from_high": (h52 - ltp) / h52 * 100 if h52 > 0 else 0.0,
-        }
-    except Exception:
-        return {}
-
-
-def early_stage_adjust(f):
-    """
-    Score adjustment (swing-scale, roughly -63..+47) from extension/early-stage features.
-    Penalises stocks that ALREADY ran; rewards entries BEFORE the move.
-    """
-    if not f or "ret5" not in f:
-        return 0, []
-    adj = 0
-    why = []
-    r3, r5, ext = f["ret3"], f["ret5"], f["ext21"]
-    if r5 >= 7:
-        adj -= 30; why.append(f"⛔ Already ran +{r5:.1f}% in 5d — late entry")
-    elif r5 >= 4.5 or r3 >= 3.5:
-        adj -= 18; why.append(f"⛔ Already +{r5:.1f}% in 5d — mostly priced in")
-    if ext > 7:
-        adj -= 15; why.append(f"⛔ {ext:.1f}% above EMA21 — stretched")
-    uptrend = f["ema21"] > f["ema50"] and f["ltp"] > f["ema50"]
-    if uptrend and 0 <= ext <= 3 and -3 <= r5 <= 2 and 42 <= f["rsi"] <= 58:
-        adj += 20; why.append("✅ Pullback to EMA21 in uptrend — early entry")
-    if uptrend and f["nr7"] and f["from_high"] <= 6 and f["ema9"] >= f["ema21"]:
-        adj += 15; why.append("✅ Tight NR7 coil under highs — pre-breakout")
-    if f["ltp"] > f["high20_prev"] and r5 <= 4.5 and f["vol_ratio"] >= 1.3 and ext <= 5:
-        adj += 12; why.append("✅ Day-1 20-day breakout on volume")
-    return adj, why
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_market_regime():
-    """Nifty 50 trend state: BULL / NEUTRAL / BEAR (UNKNOWN if data unavailable)."""
-    import yfinance as _yf
-    out = {"state": "UNKNOWN", "ret5": 0.0, "ret20": 0.0, "vix": None,
-           "detail": "Nifty trend data unavailable — signals shown with a higher bar."}
-    try:
-        df = _yf.download("^NSEI", period="1y", interval="1d", auto_adjust=True,
-                          progress=False, timeout=30)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        c = df["Close"].dropna()
-        if len(c) < 60:
-            return out
-        e20 = c.ewm(span=20, adjust=False).mean()
-        e50 = c.ewm(span=50, adjust=False).mean()
-        last, a20, a50 = float(c.iloc[-1]), float(e20.iloc[-1]), float(e50.iloc[-1])
-        slope = (float(e20.iloc[-1]) / float(e20.iloc[-6]) - 1) * 100
-        ret5 = (last / float(c.iloc[-6]) - 1) * 100
-        ret20 = (last / float(c.iloc[-21]) - 1) * 100
-        vix = None
-        try:
-            vd = _yf.download("^INDIAVIX", period="1mo", interval="1d", auto_adjust=True,
-                              progress=False, timeout=20)
-            if isinstance(vd.columns, pd.MultiIndex):
-                vd.columns = vd.columns.get_level_values(0)
-            vix = float(vd["Close"].dropna().iloc[-1])
-        except Exception:
-            vix = None
-        if (last < a50 and a20 < a50) or ret5 <= -3.0 or (last < a20 and slope < 0 and ret5 <= -1.5):
-            state = "BEAR"
-        elif last > a20 > a50 and slope > 0:
-            state = "BULL"
-        else:
-            state = "NEUTRAL"
-        if state == "BULL" and vix and vix >= 22:
-            state = "NEUTRAL"
-        detail = (f"Nifty {last:,.0f} | 20-EMA {a20:,.0f} | 50-EMA {a50:,.0f} | "
-                  f"5d {ret5:+.1f}% | 20d {ret20:+.1f}%" + (f" | VIX {vix:.1f}" if vix else ""))
-        return {"state": state, "ret5": ret5, "ret20": ret20, "vix": vix, "detail": detail}
-    except Exception:
-        return out
-
-
-def render_regime_banner(regime):
-    msgs = {
-        "BULL":    ("#0d3320", "#26de81", "🟢 MARKET UPTREND — full signal list active"),
-        "NEUTRAL": ("#3a2f0b", "#f7b731", "🟡 MARKET MIXED — only higher-score signals shown; use smaller size"),
-        "BEAR":    ("#3a0d12", "#ff4757", "🔴 MARKET DOWNTREND — long signals paused. Targets rarely hit in a falling market; staying in cash is a position."),
-        "UNKNOWN": ("#222", "#aaa", "⚪ Market trend unavailable — signals shown with a higher bar"),
-    }
-    bg, fg, text = msgs.get(regime.get("state", "UNKNOWN"), msgs["UNKNOWN"])
-    st.markdown(
-        f'<div style="background:{bg};border-left:4px solid {fg};padding:10px 14px;'
-        f'border-radius:6px;margin:6px 0 10px 0;"><b style="color:{fg}">{text}</b><br>'
-        f'<span style="color:#aab;font-size:0.8rem">{regime.get("detail","")}</span></div>',
-        unsafe_allow_html=True)
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_enrichment():
-    """Per-symbol extension/ATR features for the NIFTY 500 list (used by v3 pick functions)."""
-    import yfinance as _yf
-    out = {}
-    syms = list(_YF_NIFTY500)
-    for i in range(0, len(syms), 50):
-        chunk = syms[i:i + 50]
-        try:
-            data = _yf.download(chunk, period="1y", interval="1d", group_by="ticker",
-                                auto_adjust=True, progress=False, threads=True, timeout=30)
-            for sym_ns in chunk:
-                try:
-                    d = data[sym_ns] if len(chunk) > 1 else data
-                    f = stock_features(d)
-                    if f:
-                        out[sym_ns.replace(".NS", "")] = f
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    return out
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_n500():
     """
@@ -655,7 +493,6 @@ def fetch_n500():
 def fetch_todays_picks():
     stocks = fetch_n500()
     buys, sells = [], []
-    enr = fetch_enrichment(); regime = fetch_market_regime()
     for item in stocks:
         if not isinstance(item, dict): continue
         sym=item.get("symbol",""); ltp=_f(item.get("lastPrice",0))
@@ -683,16 +520,10 @@ def fetch_todays_picks():
         elif dist<=3: score+=2; reasons.append("Near breakout")
         elif dist>=40: score-=2
         if ltp*vol>5e8: score+=1; reasons.append("High volume")
-        ft = enr.get(sym)
-        if ft:
-            _adj, _why = early_stage_adjust(ft)
-            score += int(round(_adj/10))
-            if _why: reasons.insert(0, _why[0])
         fib=[l52+r*(h52-l52) for r in [0.236,0.382,0.5,0.618,0.786]]
         sups=[x for x in fib if x<ltp]; ress=[x for x in fib if x>ltp]
         sup=sups[-1] if sups else l52; res1=ress[0] if ress else h52; res2=ress[1] if len(ress)>=2 else h52
-        if ft: res1=ltp+1.5*ft["atr14"]; res2=ltp+3.0*ft["atr14"]
-        sl=round((ltp-1.5*ft["atr14"]) if ft else sup*0.985,2); risk=ltp-sl; rew=res1-ltp; rr=round(rew/risk,1) if risk>0 else 0
+        sl=round(sup*0.985,2); risk=ltp-sl; rew=res1-ltp; rr=round(rew/risk,1) if risk>0 else 0
         row={"Symbol":sym,"LTP":f"₹{ltp:,.1f}","Change%":f"{pchg:+.2f}%","Score":score,
              "Entry":f"₹{round(ltp*0.995,2):,.2f}","Target 1":f"₹{round(res1,2):,.2f}",
              "Target 2":f"₹{round(res2,2):,.2f}","Stop Loss":f"₹{sl:,.2f}",
@@ -701,8 +532,6 @@ def fetch_todays_picks():
         elif score>=3: row["Signal"]="🟢 BUY"; buys.append(row)
         elif score<=-5: row["Signal"]="🔴 STRONG SELL"; sells.append(row)
         elif score<=-3: row["Signal"]="🔴 SELL/AVOID"; sells.append(row)
-    if regime["state"]=="BEAR": buys=[]
-    elif regime["state"] in ("NEUTRAL","UNKNOWN"): buys=[b for b in buys if b["Score"]>=4]
     buys.sort(key=lambda x:x["Score"],reverse=True)
     sells.sort(key=lambda x:x["Score"])
     return buys[:20], sells[:15]
@@ -1324,8 +1153,6 @@ def fetch_stock_info_full(symbol):
 def fetch_power_trades():
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     IST=_tz(_td(hours=5,minutes=30)); now=_dt.now(IST); stocks=fetch_n500(); candidates=[]
-    enr=fetch_enrichment(); regime=fetch_market_regime()
-    if regime["state"]=="BEAR": return []
     fii_bullish=True
     try:
         s=get_session()
@@ -1375,23 +1202,14 @@ def fetch_power_trades():
             if gap_pct>=1: score+=8; signals.append(f"Gap up {gap_pct:.1f}%")
             elif gap_pct>=0.5: score+=4
             elif gap_pct<=-2: score-=8; signals.append(f"Gap down {gap_pct:.1f}% — avoid")
-        ft=enr.get(sym)
-        if ft:
-            _adj,_why=early_stage_adjust(ft); score+=_adj
-            if _why: signals.insert(0,_why[0])
-            if ft["ret5"]>=7: continue
         if pchg<0 and pct52<50: continue
-        if score<(40 if regime["state"]=="BULL" else 50): continue
+        if score<40: continue
         fib_levels=sorted([l52+r*(h52-l52) for r in [0.236,0.382,0.5,0.618,0.786]])
         sup=max([x for x in fib_levels if x<ltp],default=l52)
         res=min([x for x in fib_levels if x>ltp],default=h52)
         res2=sorted([x for x in fib_levels if x>ltp])[1] if len([x for x in fib_levels if x>ltp])>=2 else h52
-        entry=round(ltp*0.998,2)
-        if ft:
-            sl=round(ltp-1.5*ft["atr14"],2); tgt1=round(ltp+1.5*ft["atr14"],2); tgt2=round(ltp+3.0*ft["atr14"],2)
-        else:
-            sl=round(max(sup*0.987,ltp*0.96),2)
-            tgt1=round(min(res,ltp*1.04),2); tgt2=round(min(res2,ltp*1.08),2)
+        entry=round(ltp*0.998,2); sl=round(max(sup*0.987,ltp*0.96),2)
+        tgt1=round(min(res,ltp*1.04),2); tgt2=round(min(res2,ltp*1.08),2)
         risk=ltp-sl; reward=tgt1-ltp; rr=round(reward/risk,1) if risk>0 else 0
         n_sig=len(signals)
         if score>=85 and n_sig>=5: conf="🔥 HIGH CONFIDENCE"
@@ -1406,8 +1224,6 @@ def fetch_power_trades():
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_try_your_luck_pro():
     stocks=fetch_n500(); picks=[]
-    enr=fetch_enrichment(); regime=fetch_market_regime()
-    if regime["state"]=="BEAR": return []
     for item in stocks:
         if not isinstance(item,dict): continue
         sym=item.get("symbol",""); ltp=_f(item.get("lastPrice",0))
@@ -1424,11 +1240,7 @@ def fetch_try_your_luck_pro():
             gap=(open_p-prev)/prev*100
             if gap>=0.5: score+=2; reasons.append("Gap-up")
         if pchg>7: continue
-        ft=enr.get(sym)
-        if ft and (ft["ret5"]>=5 or ft["ext21"]>6): continue   # already ran — skip
-        entry=ltp*1.005
-        sl=(ltp-1.5*ft["atr14"]) if ft else ltp*0.97
-        target=entry+(entry-sl)*(1.5 if ft else 2); rr=(target-entry)/(entry-sl)
+        entry=ltp*1.005; sl=ltp*0.97; target=entry+(entry-sl)*2; rr=(target-entry)/(entry-sl)
         picks.append({"Symbol":sym,"LTP":f"₹{ltp:.2f}","Entry":f"₹{entry:.2f}",
             "Target":f"₹{target:.2f}","StopLoss":f"₹{sl:.2f}","RR":f"{rr:.1f}","Score":score,"Why":" | ".join(reasons)})
     picks.sort(key=lambda x:x["Score"],reverse=True)
@@ -2149,7 +1961,6 @@ with tabs[0]:
         </span>
     </div>""", unsafe_allow_html=True)
 
-    render_regime_banner(fetch_market_regime())
     with st.spinner("⚡ Running pre-market power trade algorithm..."):
         power_trades=fetch_power_trades()
 
